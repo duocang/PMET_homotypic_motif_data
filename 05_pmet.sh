@@ -1,110 +1,236 @@
 #!/bin/bash
 
+# ============================================================================
+# Script Purpose:
+# Run PMET (Promoter Motif Enrichment Tool) analysis pipeline for all species
+# using multiple motif databases. This script:
+#   1. Clones and sets up PMET analysis pipeline
+#   2. Processes all species genomes in data/genome_n_annotation
+#   3. Runs analysis with multiple motif databases per species
+#   4. Generates homotypic analysis results
+# ============================================================================
 
-# 先定义一个函数，用于将文本打印成红色
-# Define a function to print text in red color
+# ============================================================================
+# CONFIGURATION PARAMETERS
+# ============================================================================
+
+# PMET analysis parameters
+PROM_LENGTH=1000          # Promoter length (bp upstream of TSS)
+MAX_K=5                   # Maximum k-mer size
+TOP_N=5000                # Number of top motifs to consider
+FIMO_THRESH=0.05          # FIMO p-value threshold
+OVERLAP="NoOverlap"       # Overlap mode
+UTR="no"                  # Include UTR regions
+GFF3_ID="gene_id="        # GFF3 gene ID attribute
+DELETE_TEMP="yes"         # Delete temporary files after processing
+THREADS=16                # Number of CPU threads to use
+
+# Directory settings
+RESULT_DIR="homotypic_out111111"
+EXTERNAL_DIR="external"
+PMET_REPO="https://github.com/duocang/PMET_analysis_pipeline.git"
+
+# Motif database list
+MOTIF_DATABASES=(
+    "CIS-BP2"
+    "plantTFDB"
+    "Franco-Zorrilla_et_al_2014"
+    "Jaspar_plants_non_redundant_2022"
+    "Plant_Cistrome_DB"
+    "Plant_Cistrome_DB_with_family_info"
+)
+
+# ============================================================================
+# UTILITY FUNCTIONS
+# ============================================================================
+
+# Print text in red color
 print_red(){
     RED='\033[0;31m'
-    NC='\033[0m' # No Color
+    NC='\033[0m'
     printf "${RED}$1${NC}\n"
 }
 
+# Print text in green color
 print_green(){
     GREEN='\033[0;32m'
-    NC='\033[0m' # No Color
+    NC='\033[0m'
     printf "${GREEN}$1${NC}\n"
 }
 
-find ../01_PMETDEV-code/debug/scripts -type f \( -name "*.sh" -o -name "*.pl" \) -exec chmod a+x {} \;
+# Print text in yellow color
+print_yellow(){
+    YELLOW='\033[1;33m'
+    NC='\033[0m'
+    printf "${YELLOW}$1${NC}\n"
+}
 
-# 1. loop all species
+# ============================================================================
+# SETUP PMET PIPELINE
+# ============================================================================
+
+echo ""
+echo "============================================================================"
+echo "  PMET Analysis Pipeline Setup"
+echo "============================================================================"
+echo ""
+
+# Clone PMET pipeline if not exists
+if [ -d "$EXTERNAL_DIR" ]; then
+    print_yellow "External directory already exists, skipping clone..."
+else
+    print_green "Cloning PMET analysis pipeline..."
+    git clone "$PMET_REPO"
+    mv PMET_analysis_pipeline "$EXTERNAL_DIR"
+    
+    cd "$EXTERNAL_DIR"
+    bash run.sh 00_requirements_reminder.sh
+    cd ..
+fi
+
+# Make scripts executable
+print_green "Setting script permissions..."
+find "$EXTERNAL_DIR/scripts" -type f \( -name "*.sh" -o -name "*.pl" \) -exec chmod a+x {} \;
+
+# Create output directory
+mkdir -p "$RESULT_DIR"
+
+echo ""
+echo "============================================================================"
+echo "  Processing Species and Motif Databases"
+echo "============================================================================"
+echo ""
+
+# ============================================================================
+# MAIN PROCESSING LOOP
+# ============================================================================
+
+# Loop through all species
+# Loop through all species
 find data/genome_n_annotation -mindepth 1 -maxdepth 1 -type d | sort | while read dir
 do
     species=$(basename "$dir")
-
-    # 初始化变量
+    print_yellow "\nProcessing species: $species"
+    
+    # Initialize arrays for genome files
     gff3=()
     fa=()
-    # 遍历目录中的所有文件
+    
+    # Collect GFF3 and FASTA files
     for file in "$dir"/*; do
         if [[ $file == *.gff3 ]]; then
             gff3+=("$file")
-        elif [[ $file == *.fa ]] || [[ $file == *.fasta ]]; then
+            elif [[ $file == *.fa ]] || [[ $file == *.fasta ]]; then
             fa+=("$file")
         fi
     done
-
-    # 2. loop all motif databases
-    for motif_db in "CIS-BP2" "plantTFDB" "Franco-Zorrilla_et_al_2014" "Jaspar_plants_non_redundant_2022" "Plant_Cistrome_DB" "Plant_Cistrome_DB_with_family_info" ; do
-    # for motif_db in "Plant_Cistrome_DB"; do
-        if [[ $motif_db == "CIS-BP2" ]]; then
-            if [ -d "data/motif_databases/CIS-BP2/$species" ]; then
-                meme_dir=data/motif_databases/CIS-BP2/$species/TF_binding_motifs.meme
-            else
-                meme_dir="no_value"
-            fi
-        elif [[ $motif_db == "plantTFDB" ]]; then
-            if [ -d "data/motif_databases/plantTFDB/$species" ]; then
-                meme_dir=data/motif_databases/plantTFDB/$species/TF_binding_motifs.meme
-            else
-                meme_dir="no_value"
-            fi
-        elif [[ $motif_db == "Franco-Zorrilla_et_al_2014" ]]; then
-            meme_dir=data/motif_databases/Franco-Zorrilla_et_al_2014.meme
-        elif [[ $motif_db == "Jaspar_plants_non_redundant_2022" ]]; then
-            meme_dir=data/motif_databases/JASPAR2022_CORE_plants_non-redundant_pfms_meme.meme
-        elif [[ $motif_db == "Plant_Cistrome_DB" ]]; then
-            meme_dir=data/motif_databases/Plant_Cistrome_DB_parsed.meme
-        # motif name is longer, dut to family name
-        elif [[ $motif_db == "Plant_Cistrome_DB_with_family_info" ]]; then
-            meme_dir=data/motif_databases/Plant_Cistrome_DB.meme
-        else
-            echo "Unknown motif_db: $motif_db"
+    
+    # Check if genome files were found
+    if [ ${#gff3[@]} -eq 0 ] || [ ${#fa[@]} -eq 0 ]; then
+        print_red "  ✗ Missing genome files for $species (GFF3: ${#gff3[@]}, FASTA: ${#fa[@]})"
+        continue
+    fi
+    
+    print_green "  ✓ Found genome files (GFF3: ${#gff3[@]}, FASTA: ${#fa[@]})"
+    
+    # Loop through all motif databases
+    for motif_db in "${MOTIF_DATABASES[@]}"; do
+        print_green "    → Processing motif database: $motif_db"
+        
+        # Determine motif database path
+        case "$motif_db" in
+            "CIS-BP2")
+                if [ -d "data/motif_databases/CIS-BP2/$species" ]; then
+                    meme_dir="data/motif_databases/CIS-BP2/$species/TF_binding_motifs.meme"
+                else
+                    meme_dir="no_value"
+                fi
+            ;;
+            "plantTFDB")
+                if [ -d "data/motif_databases/plantTFDB/$species" ]; then
+                    meme_dir="data/motif_databases/plantTFDB/$species/TF_binding_motifs.meme"
+                else
+                    meme_dir="no_value"
+                fi
+            ;;
+            "Franco-Zorrilla_et_al_2014")
+                meme_dir="data/motif_databases/Franco-Zorrilla_et_al_2014.meme"
+            ;;
+            "Jaspar_plants_non_redundant_2022")
+                meme_dir="data/motif_databases/JASPAR2022_CORE_plants_non-redundant_pfms_meme.meme"
+            ;;
+            "Plant_Cistrome_DB")
+                meme_dir="data/motif_databases/Plant_Cistrome_DB_parsed.meme"
+            ;;
+            "Plant_Cistrome_DB_with_family_info")
+                meme_dir="data/motif_databases/Plant_Cistrome_DB.meme"
+            ;;
+            *)
+                print_red "      ✗ Unknown motif database: $motif_db"
+                continue
+            ;;
+        esac
+        
+        # Skip if motif database not available for this species
+        if [ "$meme_dir" == "no_value" ]; then
+            print_yellow "      ⊘ Motif database not available for $species, skipping..."
+            continue
         fi
-
-        ################################ Running homotypic ###################################
-        if [ "$meme_dir" != "no_value" ]; then
-            # print_green "$gff3  $fa"
-            # print_red "$species $meme_dir"
-            # echo ""
-            output=homotypic_out/$species/$motif_db
-            mkdir -p $output
-            promlength=1000
-            maxk=5
-            topn=5000
-            fimothresh=0.05
-            overlap="NoOverlap"
-            utr=no
-            gff3id="gene_id="
-            delete_temp=yes
-
-            threads=16
-
-            # if $species in "Hordeum_vulgare_R1" "Oryza_sativa_japonica_Nipponbare" "Oryza_sativa_japonica_Ensembl" "Oryza_sativa_indica_ZS97" "Oryza_sativa_japonica_V7.1" "Oryza_sativa_indica_MH63" "Oryza_sativa_indica_IR8" "Oryza_sativa_japonica_Kitaake" "Vicia_faba"
-            # fi
-
-            ../01_PMETDEV-code/debug/scripts/PMETindex_promoters_fimo_integrated.sh \
-                -r ../01_PMETDEV-code/debug/scripts \
-                -o $output      \
-                -i $gff3id      \
-                -k $maxk        \
-                -n $topn        \
-                -p $promlength  \
-                -v $overlap     \
-                -u $utr         \
-                -f $fimothresh  \
-                -t $threads     \
-                -d $delete_temp \
-                $fa             \
-                $gff3           \
-                $meme_dir
+        
+        # Check if motif file exists
+        if [ ! -f "$meme_dir" ]; then
+            print_red "      ✗ Motif file not found: $meme_dir"
+            continue
+        fi
+        
+        # Create output directory
+        output="$RESULT_DIR/$species/$motif_db"
+        mkdir -p "$output"
+        
+        # Run PMET analysis
+        print_green "      ▶ Running PMET analysis..."
+        "$EXTERNAL_DIR/scripts/PMETindex_promoters_fimo_integrated.sh" \
+        -r "$EXTERNAL_DIR/scripts" \
+        -o "$output" \
+        -i "$GFF3_ID" \
+        -k "$MAX_K" \
+        -n "$TOP_N" \
+        -p "$PROM_LENGTH" \
+        -v "$OVERLAP" \
+        -u "$UTR" \
+        -f "$FIMO_THRESH" \
+        -t "$THREADS" \
+        -d "$DELETE_TEMP" \
+        "${fa[@]}" \
+        "${gff3[@]}" \
+        "$meme_dir"
+        
+        if [ $? -eq 0 ]; then
+            print_green "      ✓ Completed: $motif_db"
+        else
+            print_red "      ✗ Failed: $motif_db"
         fi
     done
-
-    cp homotypic_out/$species/$motif_db/universe.txt homotypic_out/$species/universe.txt
-
-    # # 3. put gene list file (universe.txt) into $species folder
-    # if [[ $motif_db == "Franco-Zorrilla_et_al_2014" ]]; then
-    #     cp homotypic_out/$species/$motif_db/universe.txt homotypic_out/$species/universe.txt
-    # fi
+    
+    # Copy universe.txt to species directory (using last processed motif_db)
+    if [ -f "$RESULT_DIR/$species/$motif_db/universe.txt" ]; then
+        cp "$RESULT_DIR/$species/$motif_db/universe.txt" "$RESULT_DIR/$species/universe.txt"
+    fi
 done
+
+# ============================================================================
+# CLEANUP
+# ============================================================================
+
+echo ""
+echo "============================================================================"
+print_green "Analysis completed! Cleaning up..."
+echo "============================================================================"
+echo ""
+
+# Remove external directory
+rm -rf "$EXTERNAL_DIR"
+
+print_green "✓ All processing completed successfully!"
+print_green "Results saved in: $RESULT_DIR"
+echo ""

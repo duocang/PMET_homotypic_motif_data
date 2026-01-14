@@ -1,6 +1,8 @@
 # Project-specific directories
 data/
 homotypic_out/
+PMET_analysis_pipeline/
+external/
 
 # Python
 __pycache__/
